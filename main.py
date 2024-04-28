@@ -1,92 +1,87 @@
 import cv2
-import mediapipe as mp
-import os
-import numpy as np
-from sklearn.preprocessing import LabelEncoder
-from tensorflow.keras.models import load_model
+from scipy.spatial import distance as dist
 
-# Load the trained model
-model = load_model("model.h5")
+# Load the pre-trained face cascade classifier
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-# Initialize MediaPipe Face Detection and Pose models
-mp_face_detection = mp.solutions.face_detection
-mp_pose = mp.solutions.pose
+# Load the pre-trained eye cascade classifier
+eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
 
-face_detection = mp_face_detection.FaceDetection()
-pose = mp_pose.Pose()
+# Function to calculate Eye Aspect Ratio (EAR)
+def eye_aspect_ratio(eye):
+    A = dist.euclidean(eye[1], eye[5])
+    B = dist.euclidean(eye[2], eye[4])
+    C = dist.euclidean(eye[0], eye[3])
+    ear = (A + B) / (2.0 * C)
+    return ear
 
-# Initialize a dictionary to store names corresponding to each detected face
-names = {}
+# Function to check if the person is sleeping
+def is_sleeping(ear, threshold=0.25):  
+    return ear < threshold
 
+# Function to save image
+def save_image(frame, filename):
+    cv2.imwrite(filename, frame)
 
-# Function to detect if the person is sleeping
-def is_sleeping(landmarks):
-    # You can define your own criteria for sleeping posture
-    # For example, if the y-coordinate of the head landmark is lower than a certain threshold
-    head_y = landmarks[mp_pose.PoseLandmark.NOSE.value].y
-    print(head_y)
-    if head_y > 0.55:  # Adjust the threshold as needed
-        return True
-    else:
-        return False
-
-
-# Capture video from webcam
-cap = cv2.VideoCapture(0)
-
-person_counter = 0  # Counter to assign unique names to each detected person
-
-# Initialize LabelEncoder
-label_encoder = LabelEncoder()
+# Open the webcam
+cap = cv2.VideoCapture(0)  
 
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
 
-    # Convert the image to RGB
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # Convert the frame to grayscale
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # Process the image with MediaPipe Face Detection
-    results_face = face_detection.process(rgb_frame)
-    if results_face.detections:
-        for detection in results_face.detections:
-            bboxC = detection.location_data.relative_bounding_box
-            ih, iw, _ = frame.shape
-            bbox = int(bboxC.xmin * iw), int(bboxC.ymin * ih), int(bboxC.width * iw), int(bboxC.height * ih)
+    # Detect faces in the frame
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
-            # Draw rectangle around the face
-            cv2.rectangle(frame, bbox, (0, 255, 0), 2)
+    for (x, y, w, h) in faces:
+        # Extract eye regions
+        roi_gray = gray[y:y+h, x:x+w]
+        roi_color = frame[y:y+h, x:x+w]
 
-            # Process the image with MediaPipe Pose
-            results_pose = pose.process(rgb_frame)
+        # Detect eyes in the face region
+        eyes = eye_cascade.detectMultiScale(roi_gray)
 
-            if results_pose.pose_landmarks:
-                landmarks = results_pose.pose_landmarks.landmark
+        # If there are no eyes detected, continue to the next face
+        if len(eyes) < 2:
+            continue
 
-                # Check if the person is sleeping
-                if is_sleeping(landmarks):
-                    # Preprocess the image
-                    face_img = frame[bbox[1]:bbox[1]+bbox[3], bbox[0]:bbox[0]+bbox[2]]
-                    face_img = cv2.resize(face_img, (224, 224))
-                    face_img = np.expand_dims(face_img, axis=0)
-                    face_img = face_img / 255.0
+        # Extract the left and right eye regions
+        left_eye = []
+        right_eye = []
+        for (ex, ey, ew, eh) in eyes:
+            eye_center = (x + ex + ew // 2, y + ey + eh // 2)
+            if eye_center[0] < x + w // 2:
+                left_eye.append((ex, ey, ew, eh))
+            else:
+                right_eye.append((ex, ey, ew, eh))
 
-                    # Predict the name using the loaded model
-                    predicted_label_index = np.argmax(model.predict(face_img))
-                    predicted_name = label_encoder.inverse_transform([predicted_label_index])[0]
+        # Check if there are enough eye detections to calculate EAR
+        if len(left_eye) >= 6 and len(right_eye) >= 6:
+            # Calculate Eye Aspect Ratio (EAR) for each eye
+            left_ear = eye_aspect_ratio(left_eye)
+            right_ear = eye_aspect_ratio(right_eye)
 
-                    # Print the name and sleeping status on the screen
-                    cv2.putText(frame, f"{predicted_name} is sleeping", (bbox[0], bbox[1] - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            # Calculate the average EAR
+            ear = (left_ear + right_ear) / 2.0
+
+            # Check if the face is looking down (e.g., eyes are near the bottom of the face)
+            if (y + h) - (2 * min(left_eye[0][3], right_eye[0][3])) > y + h // 2:
+                # Display text indicating sleeping
+                cv2.putText(frame, "Sleeping", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                # Save image
+                save_image(frame, 'sleeping_image.jpg')
 
     # Display the frame
-    cv2.imshow('Frame', frame)
+    cv2.imshow("Classroom Monitoring", frame)
 
-    # Exit if 'q' is pressed
+    # Break the loop if 'q' is pressed
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# Release resources
+# Release the webcam and close all windows
 cap.release()
 cv2.destroyAllWindows()
